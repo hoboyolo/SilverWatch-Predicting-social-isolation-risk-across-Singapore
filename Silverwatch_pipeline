@@ -1,0 +1,102 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import folium 
+from folium.plugins import HeatMap
+from pathlib import Path
+
+# --- FILE PATHS ---
+POP_CSV = Path(__file__).parent / "ResidentPopulationbyPlanningAreaSubzoneofResidenceAgeGroupandSexCensusofPopulation2020.csv"
+AAC_CSV = Path(__file__).parent / "SeniorActivityCentresAndActiveAgeingCentresAnnual.csv"
+
+def run_silverwatch_pipeline():
+    print("1. Loading and processing population data...")
+    df_pop = pd.read_csv(POP_CSV)
+    
+    # Filter for Planning Area totals
+    planning_areas_df = df_pop[df_pop['Number'].str.endswith('- Total', na=False)].copy()
+    planning_areas_df['Planning_Area'] = planning_areas_df['Number'].str.replace(' - Total', '')
+    
+    # Calculate Elderly Population (65 and above)
+    elderly_cols = ['Total_65_69', 'Total_70_74', 'Total_75_79', 'Total_80_84', 'Total_85_89', 'Total_90andOver']
+    planning_areas_df['Total_Population'] = pd.to_numeric(planning_areas_df['Total_Total'], errors='coerce')
+    planning_areas_df['Elderly_Population'] = planning_areas_df[elderly_cols].apply(
+        lambda x: pd.to_numeric(x, errors='coerce')
+    ).sum(axis=1)
+    
+    planning_areas_df['Elderly_Percentage'] = (
+        planning_areas_df['Elderly_Population'] / planning_areas_df['Total_Population']
+    ) * 100
+    
+    # Compute Composite Risk Index (0-100)
+    max_count = planning_areas_df['Elderly_Population'].max()
+    max_pct = planning_areas_df['Elderly_Percentage'].max()
+    
+    planning_areas_df['Normalized_Count'] = planning_areas_df['Elderly_Population'] / max_count
+    planning_areas_df['Normalized_Pct'] = planning_areas_df['Elderly_Percentage'] / max_pct
+    planning_areas_df['Risk_Index'] = (
+        0.5 * planning_areas_df['Normalized_Count'] + 0.5 * planning_areas_df['Normalized_Pct']
+    ) * 100
+    
+    top_10 = planning_areas_df.sort_values(by='Risk_Index', ascending=False).head(10)
+    print("\n=== TOP 10 PLANNING AREAS BY RISK INDEX ===")
+    print(top_10[['Planning_Area', 'Total_Population', 'Elderly_Population', 'Risk_Index']].to_string(index=False))
+
+    print("\n2. Generating Static Poster Chart...")
+    sns.set_theme(style="whitegrid")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    top_10_sorted = top_10.sort_values(by='Risk_Index', ascending=True)
+    bars = ax.barh(top_10_sorted['Planning_Area'], top_10_sorted['Risk_Index'], color='#2b5c8f', alpha=0.85)
+    ax.set_xlabel('Composite Isolation & Aging Risk Index (0-100)')
+    ax.set_title('SilverWatch: Top 10 Planning Areas Prioritized for Eldercare Outreach')
+    ax.set_xlim(0, 100)
+    
+    for bar in bars:
+        width = bar.get_width()
+        ax.text(width + 1.5, bar.get_y() + bar.get_height()/2, f'{width:.1f}', 
+                va='center', ha='left', fontsize=10, fontweight='bold', color='#333333')
+        
+    fig.tight_layout()
+    plt.savefig('silverwatch_top10_risk.png', dpi=300)
+    plt.close()
+
+    print("\n3. Generating Interactive Geospatial Heatmap...")
+    # Approximate centroid coordinates for major Singapore planning areas (for demonstration mapping)
+    coords = {
+        'Bedok': [1.3231, 103.9273], 'Ang Mo Kio': [1.3691, 103.8454],
+        'Bukit Merah': [1.2819, 103.8239], 'Hougang': [1.3614, 103.8863],
+        'Toa Payoh': [1.3343, 103.8563], 'Tampines': [1.3525, 103.9447],
+        'Kallang': [1.3115, 103.8718], 'Queenstown': [1.2942, 103.8061],
+        'Serangoon': [1.3554, 103.8679], 'Geylang': [1.3201, 103.8918]
+    }
+    
+    # Initialize Folium map centered around Singapore
+    m = folium.Map(location=[1.3521, 103.8198], zoom_start=11, tiles='CartoDB positron')
+    
+    heat_data = []
+    for _, row in planning_areas_df.iterrows():
+        area = row['Planning_Area']
+        if area in coords:
+            lat, lon = coords[area]
+            risk = row['Risk_Index']
+            # Add weighted points for heatmap intensity based on Risk Index
+            heat_data.append([lat, lon, risk])
+            
+            # Add interactive marker with popup details
+            folium.CircleMarker(
+                location=[lat, lon],
+                radius=max(4, risk / 8),
+                color='#d9534f',
+                fill=True,
+                fill_color='#d9534f',
+                fill_opacity=0.6,
+                popup=f"<b>{area}</b><br>Risk Index: {risk:.1f}<br>Elderly Pop: {int(row['Elderly_Population']):,}"
+            ).add_to(m)
+
+    HeatMap(heat_data, min_opacity=0.4, radius=25, blur=15).add_to(m)
+    m.save('silverwatch_heatmap.html')
+    print("Interactive heatmap successfully saved as 'silverwatch_heatmap.html'!")
+
+if __name__ == "__main__":
+    run_silverwatch_pipeline()
